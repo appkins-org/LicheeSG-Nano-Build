@@ -111,9 +111,17 @@ fi
 # squashfs little-endian magic "hsqs", FIT is a flattened device tree
 # (0xd00dfeed). Cheap, and it catches a bundle assembled the wrong way round
 # before anything is overwritten.
-[ "$(dd if="$STAGE/rootfs.squashfs" bs=4 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')" = "68737173" ] \
+#
+# hexdump, not od: the image ships busybox od, which supports neither -A nor
+# -t. `od -An -tx1` there does not fall back to some other format, it exits
+# non-zero on the unrecognised option and prints its usage -- so the magic
+# never matched and EVERY bundle was rejected as "not a squashfs image",
+# naming the payload for what was really a missing applet option. busybox
+# hexdump does support -e, and this format emits the four bytes with no
+# separators or trailing newline, so it needs no tr(1) to clean up after it.
+[ "$(dd if="$STAGE/rootfs.squashfs" bs=4 count=1 2>/dev/null | hexdump -e '4/1 "%02x"')" = "68737173" ] \
     || die "rootfs.squashfs is not a squashfs image"
-[ "$(dd if="$STAGE/boot.itb" bs=4 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')" = "d00dfeed" ] \
+[ "$(dd if="$STAGE/boot.itb" bs=4 count=1 2>/dev/null | hexdump -e '4/1 "%02x"')" = "d00dfeed" ] \
     || die "boot.itb is not a FIT"
 
 rootfs_sz=$(stat -c %s "$STAGE/rootfs.squashfs")
@@ -130,18 +138,35 @@ old_itb=$( [ -f "$BOOT_MNT/boot_${target}.itb" ] && stat -c %s "$BOOT_MNT/boot_$
 
 # --- write the rootfs slot -------------------------------------------------
 log "writing rootfs.squashfs to $target_part ($rootfs_sz B)"
-# notrunc matters if $target_part is ever a regular file rather than the block
-# device it normally is -- dd would otherwise shorten it to the payload.
-dd if="$STAGE/rootfs.squashfs" of="$target_part" bs=1M conv=notrunc,fsync 2>/dev/null \
-    || die "writing $target_part failed"
+# No conv=: this image's busybox dd is built without CONFIG_FEATURE_DD_IBS_OBS,
+# so it accepts only if/of/bs/count/skip/seek and treats conv=notrunc,fsync as
+# a usage error -- which used to fail the write here on every single update.
+# Neither operand is actually needed: notrunc only ever mattered for a regular
+# file, and $target_part is checked to be a block device above, while fsync's
+# job is done by the explicit sync on the next line.
+#
+# dd's stderr is kept rather than discarded. Swallowing it is what turned the
+# conv= mismatch into a bare "writing failed" with no cause attached.
+if ! dd if="$STAGE/rootfs.squashfs" of="$target_part" bs=1M 2>"$STAGE/dd.err"; then
+    die "writing $target_part failed: $(tr '\n' ' ' < "$STAGE/dd.err")"
+fi
 sync
 
 if [ "$VERIFY" = "1" ]; then
     log "verifying $target_part"
     want=$(sha256sum "$STAGE/rootfs.squashfs" | cut -d' ' -f1)
     # Read back exactly as many bytes as were written; the partition is larger.
-    got=$(dd if="$target_part" bs=1M count=$(( (rootfs_sz + 1048575) / 1048576 )) 2>/dev/null \
-          | head -c "$rootfs_sz" | sha256sum | cut -d' ' -f1)
+    # dd does the trimming, not `head -c`: busybox head here has no -c, so the
+    # old pipeline compared a truncated-to-nothing stream and could only ever
+    # have reported a mismatch on a payload that was in fact written correctly.
+    # Whole blocks first, then whatever partial block is left over.
+    vblk=4096
+    vfull=$(( rootfs_sz / vblk ))
+    vrem=$(( rootfs_sz % vblk ))
+    got=$( { dd if="$target_part" bs="$vblk" count="$vfull" 2>/dev/null
+             [ "$vrem" -eq 0 ] \
+                 || dd if="$target_part" bs=1 skip=$(( vfull * vblk )) count="$vrem" 2>/dev/null
+           } | sha256sum | cut -d' ' -f1)
     [ "$want" = "$got" ] || die "read-back of $target_part does not match; slot $target NOT activated"
 fi
 

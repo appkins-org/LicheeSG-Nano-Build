@@ -31,7 +31,7 @@ diff --git a/arch/riscv/boot/dts/sophgo/sg2002-licheerv-nano-b.dts b/arch/riscv/
 index b185377..d093ecb 100644
 --- a/arch/riscv/boot/dts/sophgo/sg2002-licheerv-nano-b.dts
 +++ b/arch/riscv/boot/dts/sophgo/sg2002-licheerv-nano-b.dts
-@@ -95,6 +95,82 @@
+@@ -95,6 +95,112 @@
  };
  
  &usb {
@@ -62,12 +62,42 @@ index b185377..d093ecb 100644
 +	};
 +
 +	gpio0_cfg: gpio0-cfg {
-+		gpio0-pins {
-+			pinmux = <PINMUX(PIN_EMMC_CMD, 3)>,
-+				 <PINMUX(PIN_EMMC_DAT1, 3)>,
-+				 <PINMUX(PIN_EMMC_DAT0, 3)>,
-+				 <PINMUX(PIN_EMMC_DAT3, 3)>;
++		/*
++		 * Front-panel buttons. Driven open-drain: the BMC only ever
++		 * pulls them to ground for a press and floats them again, so
++		 * the pull-up is what restores HIGH on release.
++		 */
++		gpio0-button-pins {
++			pinmux = <PINMUX(PIN_EMMC_DAT3, 3)>,
++				 <PINMUX(PIN_EMMC_DAT0, 3)>;
 +			bias-pull-up;
++			drive-strength-microamp = <10800>;
++			power-source = <3300>;
++		};
++
++		/*
++		 * LED sense inputs (power-led, hdd-led). These are read, never
++		 * driven, and must carry no pull-up: 60k to 3.3V swamps any
++		 * real LED tap, pinning the line HIGH forever. That is not a
++		 * theoretical concern -- it reported the host as powered on
++		 * with nothing plugged into the header at all, and gpio-24's
++		 * edge IRQ never fired once across a soft off, a 5s force-off
++		 * and a reset. A 100k series resistor on the tap cannot
++		 * overcome it either: 3.3V * 100k/(100k+60k) = 2.06V still
++		 * reads HIGH.
++		 *
++		 * It has to be spelled "bias-pull-up = <0>" (clear just that
++		 * bit) rather than "bias-disable": pinctrl-cv18xx implements
++		 * no PIN_CONFIG_BIAS_DISABLE, so bias-disable returns
++		 * -ENOTSUPP and takes the whole pin group down with it. The
++		 * GPIO uAPI cannot substitute for this -- gpiocdev's
++		 * WithBiasDisabled/WithPullDown are accepted and then silently
++		 * ignored, because this pinctrl state owns the pad.
++		 */
++		gpio0-sense-pins {
++			pinmux = <PINMUX(PIN_EMMC_CMD, 3)>,
++				 <PINMUX(PIN_EMMC_DAT1, 3)>;
++			bias-pull-up = <0>;
 +			drive-strength-microamp = <10800>;
 +			power-source = <3300>;
 +		};
